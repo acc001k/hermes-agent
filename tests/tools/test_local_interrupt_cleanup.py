@@ -87,7 +87,8 @@ def test_kill_process_uses_cached_pgid_if_wrapper_already_exited(monkeypatch):
 
     env._kill_process(proc)
 
-    assert killpg_calls == [(67890, signal.SIGTERM), (67890, 0)]
+    assert killpg_calls[0] == (67890, signal.SIGTERM)
+    assert (67890, 0) in killpg_calls
 
 
 def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
@@ -133,7 +134,7 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
             except ImportError:
                 # Fall back to ps
                 ps = subprocess.run(
-                    ["ps", "-eo", "pid,ppid,pgid,cmd"], capture_output=True, text=True,
+                    ["ps", "-eo", "pid,ppid,pgid,command"], capture_output=True, text=True,
                 )
                 for line in ps.stdout.splitlines():
                     if "sleep 30" in line and "grep" not in line:

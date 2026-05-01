@@ -127,14 +127,32 @@ jobs:
             echo "No automatic merge was performed. Review manually, run the normal test gate, then merge deliberately."
           } > /tmp/upstream-conflict-issue.md
 
+          set +e
           EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // ""')
-          if [ -n "$EXISTING" ]; then
+          ISSUE_LOOKUP_RC=$?
+          if [ "$ISSUE_LOOKUP_RC" -eq 0 ] && [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body-file /tmp/upstream-conflict-issue.md
+            ISSUE_RC=$?
+            [ "$ISSUE_RC" -eq 0 ] && echo "Updated upstream conflict issue #$EXISTING"
           else
             gh issue create --title "$TITLE" --body-file /tmp/upstream-conflict-issue.md
+            ISSUE_RC=$?
+            [ "$ISSUE_RC" -eq 0 ] && echo "Created upstream conflict issue"
+          fi
+          set -e
+
+          if [ "${ISSUE_RC:-1}" -ne 0 ]; then
+            echo "::warning::Could not create/update conflict issue with the available token; writing conflict report to job summary."
+            {
+              cat /tmp/upstream-conflict-issue.md
+              echo
+              echo "## Manual conflict review"
+              echo "The workflow could not create/update a GitHub issue with the available token."
+              echo "Review the failed run summary and resolve the upstream merge conflict manually."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          echo "::error::Upstream sync merge conflict. Issue created/updated."
+          echo "::error::Upstream sync merge conflict. No automatic merge was performed."
           exit 1
 
       - name: Push sync branch

@@ -1220,6 +1220,11 @@ DEFAULT_CONFIG = {
         # How many pre-update backup zips to retain.  Older ones are pruned
         # automatically after each successful backup.
         "backup_keep": 5,
+        # Copy bundled skills into user/profile skill directories after a
+        # successful code update.  Enabled by default for normal installs;
+        # pass ``hermes update --no-skills`` or set this false to keep skill
+        # surfaces frozen during raw update.
+        "sync_skills": True,
     },
 
     # Config schema version - bump this when adding new required fields

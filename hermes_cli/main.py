@@ -5672,6 +5672,11 @@ def _update_via_zip(args):
 
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
+    """Legacy helper for old update flows.
+
+    Raw ``cmd_update()`` must not call this helper; the default raw-update
+    path aborts on local changes instead of hiding state in an automatic stash.
+    """
     status = subprocess.run(
         git_cmd + ["status", "--porcelain"],
         cwd=cwd,
@@ -5756,6 +5761,11 @@ def _restore_stashed_changes(
     prompt_user: bool = False,
     input_fn=None,
 ) -> bool:
+    """Legacy helper for old update flows.
+
+    Raw ``cmd_update()`` must not call this helper; failed raw code updates
+    must abort without reset/restore cleanup paths.
+    """
     if prompt_user:
         print()
         print("⚠ Local changes were stashed before updating.")
@@ -6635,6 +6645,123 @@ def _run_pre_update_backup(args) -> None:
     print()
 
 
+def _abort_raw_update(message: str, *details: str) -> None:
+    print(f"✗ {message}")
+    for detail in details:
+        if detail:
+            print(f"  {detail}")
+    sys.exit(1)
+
+
+def _run_raw_update_local_preflight(git_cmd: list[str], cwd: Path) -> str:
+    """Validate local state before raw update performs any mutation."""
+    unmerged = subprocess.run(
+        git_cmd + ["ls-files", "--unmerged"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if unmerged:
+        _abort_raw_update(
+            "Raw update blocked: unmerged/conflicted index state detected.",
+            "Resolve the conflict state, then rerun hermes update.",
+        )
+
+    status = subprocess.run(
+        git_cmd + ["status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if status:
+        _abort_raw_update(
+            "Raw update blocked: dirty working tree detected.",
+            "Commit, stash, or discard local changes explicitly, then rerun hermes update.",
+        )
+
+    current_branch = subprocess.run(
+        git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if current_branch == "HEAD":
+        _abort_raw_update(
+            "Raw update blocked: detached HEAD.",
+            "Check out main explicitly, then rerun hermes update.",
+        )
+    if current_branch != "main":
+        _abort_raw_update(
+            f"Raw update blocked: currently on branch '{current_branch}'.",
+            "Check out main explicitly, then rerun hermes update.",
+        )
+    return current_branch
+
+
+def _get_raw_update_ahead_behind(git_cmd: list[str], cwd: Path, branch: str) -> tuple[int, int]:
+    result = subprocess.run(
+        git_cmd + ["rev-list", "--left-right", "--count", f"HEAD...origin/{branch}"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    parts = result.stdout.strip().replace("\t", " ").split()
+    if len(parts) != 2:
+        raise RuntimeError(f"unexpected rev-list ahead/behind output: {result.stdout!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def _should_sync_update_skills(args) -> bool:
+    if getattr(args, "no_skills", False):
+        return False
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    updates_cfg = cfg.get("updates", {}) if isinstance(cfg, dict) else {}
+    return bool(updates_cfg.get("sync_skills", True))
+
+
+def _run_raw_update_smoke_check() -> None:
+    """Fast, local post-update gate before profile/config/restart side effects."""
+    print()
+    print("→ Running post-update smoke checks...")
+    try:
+        main_path = PROJECT_ROOT / "hermes_cli" / "main.py"
+        if main_path.exists():
+            compile(main_path.read_text(encoding="utf-8"), str(main_path), "exec")
+
+        smoke_code = (
+            "import hermes_cli, hermes_cli.main, hermes_cli.config, hermes_constants; "
+            "from hermes_cli.config import load_config; "
+            "load_config(); "
+            "assert getattr(hermes_cli, '__version__', None); "
+            "assert getattr(hermes_cli, '__release_date__', None)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", smoke_code],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            raise RuntimeError(stderr or stdout or "fresh import smoke failed")
+    except Exception as exc:
+        print(f"✗ Post-update smoke check failed: {exc}")
+        print("  Gateway restart skipped.")
+        sys.exit(1)
+    print("  ✓ Smoke checks passed")
+
+
 def cmd_update(args):
     """Update Hermes Agent to the latest version.
 
@@ -6677,10 +6804,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
     print("⚕ Updating Hermes Agent...")
     print()
 
-    # Pre-update backup — runs before any git/file mutation so users can
-    # always roll back to the exact state they had before this update.
-    _run_pre_update_backup(args)
-
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
     use_zip_update = False
@@ -6695,23 +6818,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
             )
             sys.exit(1)
-
-    # On Windows, git can fail with "unable to write loose object file: Invalid argument"
-    # due to filesystem atomicity issues. Set the recommended workaround.
-    if sys.platform == "win32" and git_dir.exists():
-        subprocess.run(
-            [
-                "git",
-                "-c",
-                "windows.appendAtomically=false",
-                "config",
-                "windows.appendAtomically",
-                "false",
-            ],
-            cwd=PROJECT_ROOT,
-            check=False,
-            capture_output=True,
-        )
 
     # Build git command once — reused for fork detection and the update itself.
     git_cmd = ["git"]
@@ -6732,8 +6838,37 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _update_via_zip(args)
         return
 
-    # Fetch and pull
+    # Local preflight must run before backup creation, stash, checkout, pull,
+    # dependency install, skill sync, config migration, or gateway restart.
+    # Raw update is intentionally explicit: no auto-stash and no branch switching.
     try:
+        branch = "main"
+        try:
+            _run_raw_update_local_preflight(git_cmd, PROJECT_ROOT)
+        except subprocess.CalledProcessError as exc:
+            stderr = (getattr(exc, "stderr", "") or "").strip()
+            _abort_raw_update(
+                "Raw update blocked: could not inspect local git state.",
+                stderr.splitlines()[0] if stderr else "Repair the git checkout, then retry.",
+            )
+
+        # On Windows, git can fail with "unable to write loose object file:
+        # Invalid argument" due to filesystem atomicity issues. Persist the
+        # workaround only after the local no-mutation preflight succeeds.
+        if sys.platform == "win32" and git_dir.exists():
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "windows.appendAtomically=false",
+                    "config",
+                    "windows.appendAtomically",
+                    "false",
+                ],
+                cwd=PROJECT_ROOT,
+                check=False,
+                capture_output=True,
+            )
 
         print("→ Fetching updates...")
         fetch_result = subprocess.run(
@@ -6759,76 +6894,41 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print(f"  {stderr.splitlines()[0]}")
             sys.exit(1)
 
-        # Get current branch (returns literal "HEAD" when detached)
-        result = subprocess.run(
-            git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        current_branch = result.stdout.strip()
-
-        # Always update against main
-        branch = "main"
-
-        # If user is on a non-main branch or detached HEAD, switch to main
-        if current_branch != "main":
-            label = (
-                "detached HEAD"
-                if current_branch == "HEAD"
-                else f"branch '{current_branch}'"
+        try:
+            ahead_count, commit_count = _get_raw_update_ahead_behind(
+                git_cmd,
+                PROJECT_ROOT,
+                branch,
             )
-            print(f"  ⚠ Currently on {label} — switching to main for update...")
-            # Stash before checkout so uncommitted work isn't lost
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
-            subprocess.run(
-                git_cmd + ["checkout", "main"],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
+        except (subprocess.CalledProcessError, RuntimeError, ValueError) as exc:
+            stderr = (getattr(exc, "stderr", "") or "").strip()
+            _abort_raw_update(
+                "Raw update blocked: could not compare local branch with origin/main.",
+                stderr.splitlines()[0] if stderr else "Run git fetch/branch repair manually, then retry.",
             )
-        else:
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
-
-        prompt_for_restore = auto_stash_ref is not None and (
-            gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty())
-        )
-
-        # Check if there are updates
-        result = subprocess.run(
-            git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        commit_count = int(result.stdout.strip())
+        if ahead_count and commit_count:
+            _abort_raw_update(
+                "Raw update blocked: local branch has diverged from origin/main.",
+                f"ahead {ahead_count}, behind {commit_count}",
+                "Preserve or externalize local commits before running raw update.",
+            )
+        if ahead_count:
+            _abort_raw_update(
+                "Raw update blocked: local commits are not on origin/main.",
+                f"ahead {ahead_count}, behind {commit_count}",
+                "Preserve, upstream, or intentionally drop them before running raw update.",
+            )
 
         if commit_count == 0:
             _invalidate_update_cache()
-            # Restore stash and switch back to original branch if we moved
-            if auto_stash_ref is not None:
-                _restore_stashed_changes(
-                    git_cmd,
-                    PROJECT_ROOT,
-                    auto_stash_ref,
-                    prompt_user=prompt_for_restore,
-                    input_fn=gw_input_fn,
-                )
-            if current_branch not in ("main", "HEAD"):
-                subprocess.run(
-                    git_cmd + ["checkout", current_branch],
-                    cwd=PROJECT_ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
             print("✓ Already up to date!")
             return
 
         print(f"→ Found {commit_count} new commit(s)")
+
+        # Pre-update backup is allowed only after the non-mutating local
+        # preflight passes and before the code pull mutates the checkout.
+        _run_pre_update_backup(args)
 
         # Snapshot critical state (state.db, config, pairing JSONs, etc.)
         # before pulling so a user can recover if something goes wrong.
@@ -6847,53 +6947,19 @@ def _cmd_update_impl(args, gateway_mode: bool):
             logger.debug("Pre-update snapshot failed: %s", exc)
 
         print("→ Pulling updates...")
-        update_succeeded = False
-        try:
-            pull_result = subprocess.run(
-                git_cmd + ["pull", "--ff-only", "origin", branch],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-            )
-            if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged (e.g. upstream
-                # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
-                print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
-                )
-                reset_result = subprocess.run(
-                    git_cmd + ["reset", "--hard", f"origin/{branch}"],
-                    cwd=PROJECT_ROOT,
-                    capture_output=True,
-                    text=True,
-                )
-                if reset_result.returncode != 0:
-                    print(f"✗ Failed to reset to origin/{branch}.")
-                    if reset_result.stderr.strip():
-                        print(f"  {reset_result.stderr.strip()}")
-                    print(
-                        "  Try manually: git fetch origin && git reset --hard origin/main"
-                    )
-                    sys.exit(1)
-            update_succeeded = True
-        finally:
-            if auto_stash_ref is not None:
-                # Don't attempt stash restore if the code update itself failed —
-                # working tree is in an unknown state.
-                if not update_succeeded:
-                    print(
-                        f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
-                    )
-                    print(f"  Restore manually with: git stash apply")
-                else:
-                    _restore_stashed_changes(
-                        git_cmd,
-                        PROJECT_ROOT,
-                        auto_stash_ref,
-                        prompt_user=prompt_for_restore,
-                        input_fn=gw_input_fn,
-                    )
+        pull_result = subprocess.run(
+            git_cmd + ["pull", "--ff-only", "origin", branch],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if pull_result.returncode != 0:
+            stderr = pull_result.stderr.strip()
+            print("✗ Fast-forward not possible; raw update aborted.")
+            if stderr:
+                print(f"  {stderr.splitlines()[0]}")
+            print("  No reset, stash restore, dependency install, skill sync, config migration, or gateway restart was run.")
+            sys.exit(1)
 
         _invalidate_update_cache()
 
@@ -6906,9 +6972,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
             )
 
-        # Fork upstream sync logic (only for main branch on forks)
+        # Raw update must never push/sync a fork implicitly.  It only updates
+        # this checkout from the configured origin/main.
         if is_fork and branch == "main":
-            _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
+            print("  ℹ Fork auto-sync skipped during raw update")
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
         # breaks on this machine, keep base deps and reinstall the remaining extras
@@ -6959,63 +7026,69 @@ def _cmd_update_impl(args, gateway_mode: bool):
         except Exception:
             pass  # non-fatal — worst case a lazy import fails gracefully
 
-        # Sync bundled skills (copies new, updates changed, respects user deletions)
-        try:
-            from tools.skills_sync import sync_skills
+        _run_raw_update_smoke_check()
 
-            print()
-            print("→ Syncing bundled skills...")
-            result = sync_skills(quiet=True)
-            if result["copied"]:
-                print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
-            if result.get("updated"):
-                print(
-                    f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
-                )
-            if result.get("user_modified"):
-                print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
-            if result.get("cleaned"):
-                print(f"  − {len(result['cleaned'])} removed from manifest")
-            if not result["copied"] and not result.get("updated"):
-                print("  ✓ Skills are up to date")
-        except Exception as e:
-            logger.debug("Skills sync during update failed: %s", e)
+        if _should_sync_update_skills(args):
+            # Sync bundled skills (copies new, updates changed, respects user deletions)
+            try:
+                from tools.skills_sync import sync_skills
 
-        # Sync bundled skills to all other profiles
-        try:
-            from hermes_cli.profiles import (
-                list_profiles,
-                get_active_profile_name,
-                seed_profile_skills,
-            )
-
-            active = get_active_profile_name()
-            other_profiles = [p for p in list_profiles() if p.name != active]
-            if other_profiles:
                 print()
-                print("→ Syncing bundled skills to other profiles...")
-                for p in other_profiles:
-                    try:
-                        r = seed_profile_skills(p.path, quiet=True)
-                        if r:
-                            copied = len(r.get("copied", []))
-                            updated = len(r.get("updated", []))
-                            modified = len(r.get("user_modified", []))
-                            parts = []
-                            if copied:
-                                parts.append(f"+{copied} new")
-                            if updated:
-                                parts.append(f"↑{updated} updated")
-                            if modified:
-                                parts.append(f"~{modified} user-modified")
-                            status = ", ".join(parts) if parts else "up to date"
-                        else:
-                            status = "sync failed"
-                        print(f"  {p.name}: {status}")
-                    except Exception as pe:
-                        print(f"  {p.name}: error ({pe})")
-        except Exception:
-            pass  # profiles module not available or no profiles
+                print("→ Syncing bundled skills...")
+                result = sync_skills(quiet=True)
+                if result["copied"]:
+                    print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
+                if result.get("updated"):
+                    print(
+                        f"  ↑ {len(result['updated'])} updated: {', '.join(result['updated'])}"
+                    )
+                if result.get("user_modified"):
+                    print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
+                if result.get("cleaned"):
+                    print(f"  − {len(result['cleaned'])} removed from manifest")
+                if not result["copied"] and not result.get("updated"):
+                    print("  ✓ Skills are up to date")
+            except Exception as e:
+                logger.debug("Skills sync during update failed: %s", e)
+
+            # Sync bundled skills to all other profiles
+            try:
+                from hermes_cli.profiles import (
+                    list_profiles,
+                    get_active_profile_name,
+                    seed_profile_skills,
+                )
+
+                active = get_active_profile_name()
+                other_profiles = [p for p in list_profiles() if p.name != active]
+                if other_profiles:
+                    print()
+                    print("→ Syncing bundled skills to other profiles...")
+                    for p in other_profiles:
+                        try:
+                            r = seed_profile_skills(p.path, quiet=True)
+                            if r:
+                                copied = len(r.get("copied", []))
+                                updated = len(r.get("updated", []))
+                                modified = len(r.get("user_modified", []))
+                                parts = []
+                                if copied:
+                                    parts.append(f"+{copied} new")
+                                if updated:
+                                    parts.append(f"↑{updated} updated")
+                                if modified:
+                                    parts.append(f"~{modified} user-modified")
+                                status = ", ".join(parts) if parts else "up to date"
+                            else:
+                                status = "sync failed"
+                            print(f"  {p.name}: {status}")
+                        except Exception as pe:
+                            print(f"  {p.name}: error ({pe})")
+            except Exception:
+                pass  # profiles module not available or no profiles
+        else:
+            print()
+            print("→ Skill sync skipped")
 
         # Sync Honcho host blocks to all profiles
         try:
@@ -9860,6 +9933,12 @@ Examples:
         action="store_true",
         default=False,
         help="Force a pre-update backup for this run (off by default; overrides updates.pre_update_backup)",
+    )
+    update_parser.add_argument(
+        "--no-skills",
+        action="store_true",
+        default=False,
+        help="Skip bundled/profile skill sync after updating code",
     )
     update_parser.set_defaults(func=cmd_update)
 

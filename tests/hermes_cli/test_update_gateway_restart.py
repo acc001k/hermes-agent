@@ -63,7 +63,11 @@ def _make_run_side_effect(
             rc = 0 if verify_ok else 128
             return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
-        # git rev-list HEAD..origin/{branch} --count
+        # git rev-list --left-right --count HEAD...origin/main
+        if "rev-list --left-right --count" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"0\t{commit_count}\n", stderr="")
+
+        # Legacy one-sided rev-list fallback, if any path still calls it.
         if "rev-list" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
 
@@ -446,6 +450,8 @@ class TestCmdUpdateLaunchdRestart:
                 return subprocess.CompletedProcess(cmd, 0, stdout="main\n", stderr="")
             if "rev-parse" in joined and "--verify" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "rev-list --left-right --count" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="0\t3\n", stderr="")
             if "rev-list" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout="3\n", stderr="")
 

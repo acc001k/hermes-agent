@@ -24,7 +24,11 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
             rc = 0 if verify_ok else 128
             return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
-        # git rev-list HEAD..origin/{branch} --count
+        # git rev-list --left-right --count HEAD...origin/main
+        if "rev-list --left-right --count" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"0\t{commit_count}\n", stderr="")
+
+        # Legacy one-sided rev-list fallback, if any path still calls it.
         if "rev-list" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
 
@@ -40,31 +44,25 @@ def mock_args():
 
 
 class TestCmdUpdateBranchFallback:
-    """cmd_update falls back to main when current branch has no remote counterpart."""
+    """cmd_update raw path branch handling."""
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_update_falls_back_to_main_when_branch_not_on_remote(
         self, mock_run, _mock_which, mock_args, capsys
     ):
-        mock_run.side_effect = _make_run_side_effect(
-            branch="fix/stoicneko", verify_ok=False, commit_count="3"
-        )
+        mock_run.side_effect = _make_run_side_effect(branch="fix/stoicneko")
 
-        cmd_update(mock_args)
+        with pytest.raises(SystemExit, match="1"):
+            cmd_update(mock_args)
 
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
-        # rev-list should use origin/main, not origin/fix/stoicneko
-        rev_list_cmds = [c for c in commands if "rev-list" in c]
-        assert len(rev_list_cmds) == 1
-        assert "origin/main" in rev_list_cmds[0]
-        assert "origin/fix/stoicneko" not in rev_list_cmds[0]
-
-        # pull should use main, not fix/stoicneko
-        pull_cmds = [c for c in commands if "pull" in c]
-        assert len(pull_cmds) == 1
-        assert "main" in pull_cmds[0]
+        assert [c for c in commands if "rev-list" in c] == []
+        assert [c for c in commands if "pull" in c] == []
+        captured = capsys.readouterr()
+        assert "fix/stoicneko" in captured.out
+        assert "Check out main explicitly" in captured.out
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")

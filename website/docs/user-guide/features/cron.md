@@ -244,7 +244,8 @@ The agent's final response is automatically delivered. You do not need to call `
 
 By default, delivered cron output is wrapped with a header and footer so the recipient knows it came from a scheduled task:
 
-```
+<!-- ascii-guard-ignore -->
+```text
 Cronjob Response: Morning feeds
 -------------
 
@@ -252,6 +253,7 @@ Cronjob Response: Morning feeds
 
 Note: The agent cannot see this message, and therefore cannot respond to it.
 ```
+<!-- ascii-guard-ignore-end -->
 
 To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false`:
 

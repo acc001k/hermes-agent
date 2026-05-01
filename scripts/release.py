@@ -50,6 +50,7 @@ AUTHOR_MAP = {
     "rylen.anil@gmail.com": "rylena",
     "godnanijatin@gmail.com": "jatingodnani",
     "mind-dragon@nous.research": "Mind-Dragon",
+    "acc001k@users.noreply.github.com": "acc001k",
     "14046872+tmimmanuel@users.noreply.github.com": "tmimmanuel",
     "revar@users.noreply.github.com": "revaraver",
     # Matrix parity salvage batch (April 2026)

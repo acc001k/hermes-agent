@@ -1020,8 +1020,7 @@ def test_update_skills_sync_enabled_by_default(monkeypatch):
 
 def test_update_skills_sync_disabled_by_config(monkeypatch):
     monkeypatch.setattr(
-        hermes_config,
-        "load_config",
+        "hermes_cli.config.load_config",
         lambda: {"updates": {"sync_skills": False}},
     )
 
@@ -1030,8 +1029,7 @@ def test_update_skills_sync_disabled_by_config(monkeypatch):
 
 def test_update_skills_sync_disabled_by_cli_even_when_config_enabled(monkeypatch):
     monkeypatch.setattr(
-        hermes_config,
-        "load_config",
+        "hermes_cli.config.load_config",
         lambda: {"updates": {"sync_skills": True}},
     )
 

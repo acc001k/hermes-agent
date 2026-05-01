@@ -395,6 +395,45 @@ class LocalEnvironment(BaseEnvironment):
                 # The group exists, even if this process cannot signal it.
                 return True
 
+        def _pids_in_group(pgid: int) -> list[int]:
+            """Return live process IDs currently assigned to *pgid*.
+
+            ``killpg`` should normally be sufficient, but Linux CI has shown
+            cases where the shell wrapper exits while a grandchild remains
+            reparented to PID 1 in the same process group. Enumerating the group
+            gives cleanup a second, explicit per-PID kill path for those strays.
+            """
+            try:
+                ps = subprocess.run(
+                    ["ps", "-o", "pid=", "-g", str(pgid)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except (OSError, ValueError):
+                return []
+            pids: list[int] = []
+            for raw in ps.stdout.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    pid = int(raw.split()[0])
+                except (ValueError, IndexError):
+                    continue
+                if pid != os.getpid():
+                    pids.append(pid)
+            return pids
+
+        def _signal_group_members(pgid: int, sig: signal.Signals) -> None:
+            for pid in _pids_in_group(pgid):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    continue
+
         def _wait_for_group_exit(pgid: int, timeout: float) -> bool:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -428,6 +467,7 @@ class LocalEnvironment(BaseEnvironment):
                     os.killpg(pgid, signal.SIGTERM)
                 except ProcessLookupError:
                     return
+                _signal_group_members(pgid, signal.SIGTERM)
 
                 # Wait on the process group, not just the shell wrapper. Under
                 # load the wrapper can exit before grandchildren do; returning
@@ -440,7 +480,8 @@ class LocalEnvironment(BaseEnvironment):
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     return
-                _wait_for_group_exit(pgid, 2.0)
+                _signal_group_members(pgid, signal.SIGKILL)
+                _wait_for_group_exit(pgid, 5.0)
                 try:
                     proc.wait(timeout=0.2)
                 except (subprocess.TimeoutExpired, OSError):

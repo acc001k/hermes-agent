@@ -884,6 +884,7 @@ class GatewayRunner:
         # /new and /reset.  /model and other mid-session operations
         # preserve the queue.
         self._queued_events: Dict[str, List[MessageEvent]] = {}
+        self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
 
@@ -1741,7 +1742,10 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                return bool(cfg_get(cfg, "display", "show_reasoning", default=False))
+                return is_truthy_value(
+                    cfg_get(cfg, "display", "show_reasoning"),
+                    default=False,
+                )
         except Exception:
             pass
         return False
@@ -3957,6 +3961,11 @@ class GatewayRunner:
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         }
+        # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).
+        platform_allow_bots_map = {
+            Platform.DISCORD: "DISCORD_ALLOW_BOTS",
+            Platform.FEISHU: "FEISHU_ALLOW_BOTS",
+        }
 
         # Plugin platforms: check the registry for auth env var names
         if source.platform not in platform_env_map:
@@ -3976,14 +3985,9 @@ class GatewayRunner:
         if platform_allow_all_var and os.getenv(platform_allow_all_var, "").lower() in ("true", "1", "yes"):
             return True
 
-        # Discord bot senders that passed the DISCORD_ALLOW_BOTS platform
-        # filter are already authorized at the platform level — skip the
-        # user allowlist. Without this, bot messages allowed by
-        # DISCORD_ALLOW_BOTS=mentions/all would be rejected here with
-        # "Unauthorized user" (fixes #4466).
-        if source.platform == Platform.DISCORD and getattr(source, "is_bot", False):
-            allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
-            if allow_bots in ("mentions", "all"):
+        if getattr(source, "is_bot", False):
+            allow_bots_var = platform_allow_bots_map.get(source.platform)
+            if allow_bots_var and os.getenv(allow_bots_var, "none").lower().strip() in ("mentions", "all"):
                 return True
 
         # Discord role-based access (DISCORD_ALLOWED_ROLES): the adapter's
@@ -5079,22 +5083,29 @@ class GatewayRunner:
         preprocessing pipeline so sender attribution, image enrichment, STT,
         document notes, reply context, and @ references all behave the same.
 
-        Side effect: writes ``self._pending_native_image_paths`` to a list of
-        local image paths when the active model supports native vision AND
-        the user has images attached. The caller consumes and clears this
-        attribute at the ``run_conversation`` site to build a multimodal user
-        turn. When the list is empty, the ``_enrich_message_with_vision``
-        text path has already run and images are represented in-text.
+        Side effect: buffers per-session native image paths when the active
+        model supports native vision AND the user has images attached. The
+        caller consumes and clears that session-scoped buffer at the
+        ``run_conversation`` site to build a multimodal user turn. When the
+        list is empty, the ``_enrich_message_with_vision`` text path has
+        already run and images are represented in-text.
         """
         history = history or []
         message_text = event.text or ""
-        # Reset per-call buffer; set only when native routing is chosen.
-        self._pending_native_image_paths = []
+        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
+        _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
+        # Use the same helper every other call site uses so the write key here
+        # matches the consume key at the run_conversation site — even if the
+        # session store overrides build_session_key's default behavior.
+        session_key = self._session_key_for_source(source)
+        # Reset only this session's per-call buffer; other sessions may be
+        # concurrently preparing multimodal turns on the same runner.
+        self._consume_pending_native_image_paths(session_key)
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            group_sessions_per_user=_group_sessions_per_user,
+            thread_sessions_per_user=_thread_sessions_per_user,
         )
         if _is_shared_multi_user and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
@@ -5115,7 +5126,11 @@ class GatewayRunner:
                 _img_mode = self._decide_image_input_mode()
                 if _img_mode == "native":
                     # Defer attachment to the run_conversation call site.
-                    self._pending_native_image_paths = list(image_paths)
+                    pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+                    if pending_native is None:
+                        pending_native = {}
+                        self._pending_native_image_paths_by_session = pending_native
+                    pending_native[session_key] = list(image_paths)
                     logger.info(
                         "Image routing: native (model supports vision). %d image(s) will be attached inline.",
                         len(image_paths),
@@ -5254,6 +5269,12 @@ class GatewayRunner:
 
         return message_text
 
+    def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
+        pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+        if not pending_native:
+            return []
+        return list(pending_native.pop(session_key, []) or [])
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -5282,7 +5303,12 @@ class GatewayRunner:
         _is_new_session = (
             session_entry.created_at == session_entry.updated_at
             or getattr(session_entry, "was_auto_reset", False)
+            or getattr(session_entry, "is_fresh_reset", False)
         )
+        # Consume the is_fresh_reset flag immediately so it doesn't leak
+        # onto subsequent messages in the same session (issue #6508).
+        if getattr(session_entry, "is_fresh_reset", False):
+            session_entry.is_fresh_reset = False
         if _is_new_session:
             await self.hooks.emit("session:start", {
                 "platform": source.platform.value if source.platform else "",
@@ -6550,11 +6576,30 @@ class GatewayRunner:
         queue_depth = self._queue_depth(session_key, adapter=adapter)
 
         title = None
+        # Pull token totals from the SQLite session DB rather than the
+        # in-memory SessionStore.  The agent's per-turn token deltas are
+        # persisted into sessions_db (run_agent.py), not into SessionEntry,
+        # so session_entry.total_tokens is always 0.  SessionDB is the
+        # single source of truth; reading it here keeps /status accurate
+        # without duplicating token writes into two stores.
+        db_total_tokens = 0
         if self._session_db:
             try:
                 title = self._session_db.get_session_title(session_entry.session_id)
             except Exception:
                 title = None
+            try:
+                row = self._session_db.get_session(session_entry.session_id)
+                if row:
+                    db_total_tokens = (
+                        (row.get("input_tokens") or 0)
+                        + (row.get("output_tokens") or 0)
+                        + (row.get("cache_read_tokens") or 0)
+                        + (row.get("cache_write_tokens") or 0)
+                        + (row.get("reasoning_tokens") or 0)
+                    )
+            except Exception:
+                db_total_tokens = 0
 
         lines = [
             "📊 **Hermes Gateway Status**",
@@ -6566,7 +6611,7 @@ class GatewayRunner:
         lines.extend([
             f"**Created:** {session_entry.created_at.strftime('%Y-%m-%d %H:%M')}",
             f"**Last Activity:** {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}",
-            f"**Tokens:** {session_entry.total_tokens:,}",
+            f"**Tokens:** {db_total_tokens:,}",
             f"**Agent Running:** {'Yes ⚡' if is_running else 'No'}",
         ])
         if queue_depth:
@@ -8309,7 +8354,10 @@ class GatewayRunner:
         # --- check config gate ------------------------------------------------
         try:
             user_config = _load_gateway_config()
-            gate_enabled = cfg_get(user_config, "display", "tool_progress_command", default=False)
+            gate_enabled = is_truthy_value(
+                cfg_get(user_config, "display", "tool_progress_command"),
+                default=False,
+            )
         except Exception:
             gate_enabled = False
 
@@ -8752,8 +8800,12 @@ class GatewayRunner:
                     tool_name=msg.get("tool_name") or msg.get("name"),
                     tool_calls=msg.get("tool_calls"),
                     tool_call_id=msg.get("tool_call_id"),
+                    finish_reason=msg.get("finish_reason"),
                     reasoning=msg.get("reasoning"),
                     reasoning_content=msg.get("reasoning_content"),
+                    reasoning_details=msg.get("reasoning_details"),
+                    codex_reasoning_items=msg.get("codex_reasoning_items"),
+                    codex_message_items=msg.get("codex_message_items"),
                 )
             except Exception:
                 pass  # Best-effort copy
@@ -11256,7 +11308,10 @@ class GatewayRunner:
                             tool_progress_hint_gateway,
                         )
                         _cfg = _load_gateway_config()
-                        gate_on = bool(cfg_get(_cfg, "display", "tool_progress_command", default=False))
+                        gate_on = is_truthy_value(
+                            cfg_get(_cfg, "display", "tool_progress_command"),
+                            default=False,
+                        )
                         if gate_on and not is_seen(_cfg, TOOL_PROGRESS_FLAG):
                             long_tool_hint_fired[0] = True
                             progress_queue.put(tool_progress_hint_gateway())
@@ -12136,8 +12191,7 @@ class GatewayRunner:
                 # attachment, wrap the user turn as an OpenAI-style multimodal
                 # content list. Consume-and-clear so subsequent turns on the same
                 # runner instance don't re-attach stale images.
-                _native_imgs = list(getattr(self, "_pending_native_image_paths", []) or [])
-                self._pending_native_image_paths = []
+                _native_imgs = self._consume_pending_native_image_paths(session_key)
                 if _native_imgs:
                     try:
                         from agent.image_routing import build_native_content_parts

@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
     Transport,
@@ -125,9 +126,11 @@ _cfg_lock = threading.Lock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
-_SLASH_WORKER_TIMEOUT_S = max(
-    5.0, float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S", "45") or 45)
-)
+try:
+    _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
+except (ValueError, TypeError):
+    _slash_timeout = 45.0
+_SLASH_WORKER_TIMEOUT_S = max(5.0, _slash_timeout)
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 
@@ -153,8 +156,12 @@ _LONG_HANDLERS = frozenset(
     }
 )
 
+try:
+    _rpc_pool_workers = max(2, int(os.environ.get("HERMES_TUI_RPC_POOL_WORKERS") or "4"))
+except (ValueError, TypeError):
+    _rpc_pool_workers = 4
 _pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=max(2, int(os.environ.get("HERMES_TUI_RPC_POOL_WORKERS", "4") or 4)),
+    max_workers=_rpc_pool_workers,
     thread_name_prefix="tui-rpc",
 )
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
@@ -3415,7 +3422,7 @@ def _(rid, params: dict) -> dict:
                     enable_session_yolo(session["session_key"])
                     nv = "1"
             else:
-                current = bool(os.environ.get("HERMES_YOLO_MODE"))
+                current = is_truthy_value(os.environ.get("HERMES_YOLO_MODE"))
                 if current:
                     os.environ.pop("HERMES_YOLO_MODE", None)
                     nv = "0"

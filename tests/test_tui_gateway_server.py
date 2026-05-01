@@ -1005,6 +1005,21 @@ def test_config_busy_get_and_set(monkeypatch):
     assert ("display.busy_input_mode", "interrupt") in writes
 
 
+def test_config_set_yolo_process_scope_treats_false_like_env_as_disabled(monkeypatch):
+    monkeypatch.setenv("HERMES_YOLO_MODE", "false")
+
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "config.set",
+            "params": {"key": "yolo"},
+        }
+    )
+
+    assert resp["result"]["value"] == "1"
+    assert os.environ.get("HERMES_YOLO_MODE") == "1"
+
+
 def test_config_get_statusbar_survives_non_dict_display(monkeypatch):
     monkeypatch.setattr(server, "_load_cfg", lambda: {"display": "broken"})
 
@@ -1921,6 +1936,55 @@ def test_input_detect_drop_attaches_image(monkeypatch):
     assert resp["result"]["matched"] is True
     assert resp["result"]["is_image"] is True
     assert resp["result"]["text"] == "[User attached image: cat.png]"
+
+
+def test_input_detect_drop_path_with_spaces(tmp_path):
+    """input.detect_drop correctly handles image paths containing spaces."""
+    # Create a minimal PNG file with a space in its name
+    img = tmp_path / "screenshot with spaces.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")  # valid PNG header
+
+    server._sessions["sid"] = _session()
+
+    resp = server.handle_request(
+        {
+            "id": "2",
+            "method": "input.detect_drop",
+            "params": {"session_id": "sid", "text": str(img)},
+        }
+    )
+
+    assert resp["result"]["matched"] is True
+    assert resp["result"]["is_image"] is True
+    assert resp["result"]["path"] == str(img)
+    assert resp["result"]["text"] == f"[User attached image: {img.name}]"
+    # Verify attachment was recorded in the session
+    assert len(server._sessions["sid"]["attached_images"]) == 1
+    assert server._sessions["sid"]["attached_images"][0] == str(img)
+
+
+def test_input_detect_drop_path_with_spaces_and_remainder(tmp_path):
+    """input.detect_drop splits remainder when path contains spaces."""
+    img = tmp_path / "photo with space.jpg"
+    img.write_bytes(b"\xff\xd8\xff" + b"fakejpeg")  # minimal-ish JPEG header
+
+    server._sessions["sid"] = _session()
+
+    user_input = f"{img} describe this image"
+    resp = server.handle_request(
+        {
+            "id": "3",
+            "method": "input.detect_drop",
+            "params": {"session_id": "sid", "text": user_input},
+        }
+    )
+
+    assert resp["result"]["matched"] is True
+    assert resp["result"]["is_image"] is True
+    assert resp["result"]["path"] == str(img)
+    # Remainder becomes the text sent to the model
+    assert resp["result"]["text"] == "describe this image"
+    assert server._sessions["sid"]["attached_images"][0] == str(img)
 
 
 def test_rollback_restore_resolves_number_and_file_path():

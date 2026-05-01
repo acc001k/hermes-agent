@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
     Transport,
@@ -125,9 +126,11 @@ _cfg_lock = threading.Lock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
-_SLASH_WORKER_TIMEOUT_S = max(
-    5.0, float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S", "45") or 45)
-)
+try:
+    _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
+except (ValueError, TypeError):
+    _slash_timeout = 45.0
+_SLASH_WORKER_TIMEOUT_S = max(5.0, _slash_timeout)
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 
@@ -153,8 +156,12 @@ _LONG_HANDLERS = frozenset(
     }
 )
 
+try:
+    _rpc_pool_workers = max(2, int(os.environ.get("HERMES_TUI_RPC_POOL_WORKERS") or "4"))
+except (ValueError, TypeError):
+    _rpc_pool_workers = 4
 _pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=max(2, int(os.environ.get("HERMES_TUI_RPC_POOL_WORKERS", "4") or 4)),
+    max_workers=_rpc_pool_workers,
     thread_name_prefix="tui-rpc",
 )
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
@@ -417,11 +424,35 @@ def method(name: str):
     return dec
 
 
+def _normalize_request(req: Any) -> tuple[Any, str, dict] | dict:
+    """Validate a JSON-RPC request enough for safe local dispatch."""
+    if not isinstance(req, dict):
+        return _err(None, -32600, "invalid request: expected an object")
+
+    rid = req.get("id")
+    method = req.get("method")
+    if not isinstance(method, str) or not method:
+        return _err(rid, -32600, "invalid request: method must be a non-empty string")
+
+    params = req.get("params", {})
+    if params is None:
+        params = {}
+    elif not isinstance(params, dict):
+        return _err(rid, -32602, "invalid params: expected an object")
+
+    return rid, method, params
+
+
 def handle_request(req: dict) -> dict | None:
-    fn = _methods.get(req.get("method", ""))
+    normalized = _normalize_request(req)
+    if isinstance(normalized, dict):
+        return normalized
+
+    rid, method, params = normalized
+    fn = _methods.get(method)
     if not fn:
-        return _err(req.get("id"), -32601, f"unknown method: {req.get('method')}")
-    return fn(req.get("id"), req.get("params", {}))
+        return _err(rid, -32601, f"unknown method: {method}")
+    return fn(rid, params)
 
 
 def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
@@ -439,7 +470,12 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
     t = transport or _stdio_transport
     token = bind_transport(t)
     try:
-        if req.get("method") not in _LONG_HANDLERS:
+        normalized = _normalize_request(req)
+        if isinstance(normalized, dict):
+            return normalized
+
+        _rid, method, _params = normalized
+        if method not in _LONG_HANDLERS:
             return handle_request(req)
 
         # Snapshot the context so the pool worker sees the bound transport.
@@ -3386,7 +3422,7 @@ def _(rid, params: dict) -> dict:
                     enable_session_yolo(session["session_key"])
                     nv = "1"
             else:
-                current = bool(os.environ.get("HERMES_YOLO_MODE"))
+                current = is_truthy_value(os.environ.get("HERMES_YOLO_MODE"))
                 if current:
                     os.environ.pop("HERMES_YOLO_MODE", None)
                     nv = "0"
@@ -4086,11 +4122,15 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
 
     try:
-        from hermes_cli.plugins import get_plugin_command_handler
+        from hermes_cli.plugins import (
+            get_plugin_command_handler,
+            resolve_plugin_command_result,
+        )
 
         handler = get_plugin_command_handler(name)
         if handler:
-            return _ok(rid, {"type": "plugin", "output": str(handler(arg) or "")})
+            result = resolve_plugin_command_result(handler(arg))
+            return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
 

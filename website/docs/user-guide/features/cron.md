@@ -214,63 +214,41 @@ A file lock at `~/.hermes/cron/.tick.lock` prevents overlapping scheduler ticks 
 
 When scheduling jobs, you specify where the output goes:
 
-| Option | Description | Example |
-|--------|-------------|---------|
-| `"origin"` | Back to where the job was created | Default on messaging platforms |
-| `"local"` | Save to local files only (`~/.hermes/cron/output/`) | Default on CLI |
-| `"telegram"` | Telegram home channel | Uses `TELEGRAM_HOME_CHANNEL` |
-| `"telegram:123456"` | Specific Telegram chat by ID | Direct delivery |
-| `"telegram:-100123:17585"` | Specific Telegram topic | `chat_id:thread_id` format |
-| `"discord"` | Discord home channel | Uses `DISCORD_HOME_CHANNEL` |
-| `"discord:#engineering"` | Specific Discord channel | By channel name |
-| `"slack"` | Slack home channel | |
-| `"whatsapp"` | WhatsApp home | |
-| `"signal"` | Signal | |
-| `"matrix"` | Matrix home room | |
-| `"mattermost"` | Mattermost home channel | |
-| `"email"` | Email | |
-| `"sms"` | SMS via Twilio | |
-| `"homeassistant"` | Home Assistant | |
-| `"dingtalk"` | DingTalk | |
-| `"feishu"` | Feishu/Lark | |
-| `"wecom"` | WeCom | |
-| `"weixin"` | Weixin (WeChat) | |
-| `"bluebubbles"` | BlueBubbles (iMessage) | |
-| `"qqbot"` | QQ Bot (Tencent QQ) | |
+- `"origin"`: back to where the job was created. This is the default on messaging platforms.
+- `"local"`: save to local files only in `~/.hermes/cron/output/`. This is the default on CLI.
+- `"telegram"`: Telegram home channel, using `TELEGRAM_HOME_CHANNEL`.
+- `"telegram:123456"`: a specific Telegram chat by ID.
+- `"telegram:-100123:17585"`: a specific Telegram topic using `chat_id:thread_id` format.
+- `"discord"`: Discord home channel, using `DISCORD_HOME_CHANNEL`.
+- `"discord:#engineering"`: a specific Discord channel by channel name.
+- `"slack"`: Slack home channel.
+- `"whatsapp"`: WhatsApp home.
+- `"signal"`: Signal.
+- `"matrix"`: Matrix home room.
+- `"mattermost"`: Mattermost home channel.
+- `"email"`: Email.
+- `"sms"`: SMS via Twilio.
+- `"homeassistant"`: Home Assistant.
+- `"dingtalk"`: DingTalk.
+- `"feishu"`: Feishu/Lark.
+- `"wecom"`: WeCom.
+- `"weixin"`: Weixin/WeChat.
+- `"bluebubbles"`: BlueBubbles/iMessage.
+- `"qqbot"`: Tencent QQ Bot.
 
 The agent's final response is automatically delivered. You do not need to call `send_message` in the cron prompt.
 
 ### Response wrapping
 
-By default, delivered cron output is wrapped with a header and footer so the recipient knows it came from a scheduled task:
+By default, delivered cron output is wrapped with a header and footer so the recipient knows it came from a scheduled task. The delivered message includes the cron job name, the agent output, and a note that the scheduled agent cannot see or respond to the delivered notification.
 
-```
-Cronjob Response: Morning feeds
--------------
-
-<agent output here>
-
-Note: The agent cannot see this message, and therefore cannot respond to it.
-```
-
-To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false`:
-
-```yaml
-# ~/.hermes/config.yaml
-cron:
-  wrap_response: false
-```
+To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false` in `~/.hermes/config.yaml`.
 
 ### Silent suppression
 
 If the agent's final response starts with `[SILENT]`, delivery is suppressed entirely. The output is still saved locally for audit (in `~/.hermes/cron/output/`), but no message is sent to the delivery target.
 
-This is useful for monitoring jobs that should only report when something is wrong:
-
-```text
-Check if nginx is running. If everything is healthy, respond with only [SILENT].
-Otherwise, report the issue.
-```
+This is useful for monitoring jobs that should only report when something is wrong. For example: ask the job to check whether nginx is running, respond with only `[SILENT]` when healthy, and otherwise report the issue.
 
 Failed jobs always deliver regardless of the `[SILENT]` marker — only successful runs can be silenced.
 

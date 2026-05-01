@@ -2883,10 +2883,20 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
-# the chat tab generates on mount; entries auto-evict when the last subscriber
-# drops AND the publisher has disconnected.
-_event_channels: dict[str, set] = {}
-_event_lock = asyncio.Lock()
+# the chat tab generates on mount.  Each subscriber owns a queue that its own
+# /api/events task drains into its WebSocket; publishers never send directly to
+# another endpoint's WebSocket object.  That keeps fan-out single-owner.
+#
+# Starlette's TestClient may drive concurrent websocket connections from
+# separate threads/event loops.  asyncio.Queue and asyncio.Lock are not
+# cross-thread wakeup primitives, so store the subscriber's event loop and
+# schedule queue writes onto that loop.  In production uvicorn this is still a
+# same-loop call; in tests it prevents lost wakeups when /api/pub and
+# /api/events are nested in the same synchronous test.
+_EventSubscriber = tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]
+_event_channels: dict[str, set[_EventSubscriber]] = {}
+_event_lock = threading.Lock()
+_EVENT_QUEUE_MAXSIZE = 100
 
 
 def _resolve_chat_argv(
@@ -2937,18 +2947,32 @@ def _build_sidecar_url(channel: str) -> Optional[str]:
     return f"ws://{netloc}/api/pub?{qs}"
 
 
+def _enqueue_event(queue: asyncio.Queue[str], payload: str) -> None:
+    """Enqueue an event on the subscriber loop without blocking publishers."""
+    try:
+        queue.put_nowait(payload)
+    except asyncio.QueueFull:
+        # Preserve liveness for a slow/stalled browser: drop the oldest sidebar
+        # event rather than blocking the PTY publisher forever.
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
+
+
 async def _broadcast_event(channel: str, payload: str) -> None:
     """Fan out one publisher frame to every subscriber on `channel`."""
-    async with _event_lock:
-        subs = list(_event_channels.get(channel, ()))
+    with _event_lock:
+        subscribers = list(_event_channels.get(channel, ()))
 
-    for sub in subs:
-        try:
-            await sub.send_text(payload)
-        except Exception:
-            # Subscriber went away mid-send; the /api/events finally clause
-            # will remove it from the registry on its next iteration.
-            pass
+    for loop, queue in subscribers:
+        if loop.is_closed():
+            continue
+        loop.call_soon_threadsafe(_enqueue_event, queue, payload)
 
 
 def _channel_or_close_code(ws: WebSocket) -> Optional[str]:
@@ -3154,23 +3178,49 @@ async def events_ws(ws: WebSocket) -> None:
 
     await ws.accept()
 
-    async with _event_lock:
-        _event_channels.setdefault(channel, set()).add(ws)
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
+    subscriber = (loop, queue)
+
+    with _event_lock:
+        _event_channels.setdefault(channel, set()).add(subscriber)
+
+    receive_task: asyncio.Task | None = None
+    send_task: asyncio.Task | None = None
 
     try:
+        receive_task = asyncio.create_task(ws.receive_text())
+        send_task = asyncio.create_task(queue.get())
+
         while True:
-            # Subscribers don't speak — the receive() just blocks until
-            # disconnect so the connection stays open as long as the
-            # browser holds it.
-            await ws.receive_text()
+            # Subscribers usually don't speak; receive_task exists to notice
+            # browser disconnects.  send_task serializes all writes through this
+            # endpoint's own task instead of letting /api/pub write to us.
+            done, _pending = await asyncio.wait(
+                {receive_task, send_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if receive_task in done:
+                # Raises WebSocketDisconnect when the browser goes away.
+                receive_task.result()
+                receive_task = asyncio.create_task(ws.receive_text())
+
+            if send_task in done:
+                await ws.send_text(send_task.result())
+                send_task = asyncio.create_task(queue.get())
     except WebSocketDisconnect:
         pass
     finally:
-        async with _event_lock:
+        for task in (receive_task, send_task):
+            if task is not None:
+                task.cancel()
+
+        with _event_lock:
             subs = _event_channels.get(channel)
 
             if subs is not None:
-                subs.discard(ws)
+                subs.discard(subscriber)
 
                 if not subs:
                     _event_channels.pop(channel, None)

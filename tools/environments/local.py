@@ -358,28 +358,38 @@ class LocalEnvironment(BaseEnvironment):
         args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
         run_env = _make_run_env(self.env)
 
-        proc = subprocess.Popen(
-            args,
-            text=True,
-            env=run_env,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=self.cwd,
-        )
-        if not _IS_WINDOWS:
-            try:
-                proc._hermes_pgid = os.getpgid(proc.pid)
-            except ProcessLookupError:
-                pass
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                args,
+                text=True,
+                env=run_env,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                preexec_fn=None if _IS_WINDOWS else os.setsid,
+                cwd=self.cwd,
+            )
+            if not _IS_WINDOWS:
+                try:
+                    proc._hermes_pgid = os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    pass
 
-        if stdin_data is not None:
-            _pipe_stdin(proc, stdin_data)
+            if stdin_data is not None:
+                _pipe_stdin(proc, stdin_data)
 
-        return proc
+            return proc
+        except (KeyboardInterrupt, SystemExit):
+            # A thread-targeted KeyboardInterrupt can arrive after Popen has
+            # spawned bash but before execute() reaches _wait_for_process().
+            # Without cleanup here, that tiny window leaks the fresh process
+            # group because the base wait-loop never receives the proc handle.
+            if proc is not None:
+                self._kill_process(proc)
+            raise
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
@@ -395,9 +405,67 @@ class LocalEnvironment(BaseEnvironment):
                 # The group exists, even if this process cannot signal it.
                 return True
 
-        def _wait_for_group_exit(pgid: int, timeout: float) -> bool:
+        def _pids_in_group(pgid: int) -> list[int]:
+            """Return live process IDs currently assigned to *pgid*.
+
+            ``killpg`` should normally be sufficient, but Linux CI has shown
+            cases where the shell wrapper exits while a grandchild remains
+            reparented to PID 1 in the same process group. Enumerating the group
+            gives cleanup a second, explicit per-PID kill path for those strays.
+            """
+            try:
+                ps = subprocess.run(
+                    ["ps", "-o", "pid=", "-g", str(pgid)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except (OSError, ValueError):
+                return []
+            pids: list[int] = []
+            for raw in ps.stdout.splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    pid = int(raw.split()[0])
+                except (ValueError, IndexError):
+                    continue
+                if pid != os.getpid():
+                    pids.append(pid)
+            return pids
+
+        def _signal_group_members(pgid: int, sig: signal.Signals) -> None:
+            for pid in _pids_in_group(pgid):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    continue
+
+        def _wait_for_group_exit(
+            pgid: int,
+            timeout: float,
+            retry_signal: signal.Signals | None = None,
+        ) -> bool:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                if retry_signal is not None and not _IS_WINDOWS:
+                    # A child can appear/reparent inside the process group
+                    # just after the initial group signal (bash may be in the
+                    # middle of fork/exec when the interrupt lands). Keep
+                    # signalling both the group and enumerated members during
+                    # the grace window so late-arriving grandchildren are not
+                    # missed.
+                    try:
+                        os.killpg(pgid, retry_signal)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        pass
+                    _signal_group_members(pgid, retry_signal)
+
                 # Reap the wrapper promptly. A dead but unreaped group leader
                 # still makes killpg(pgid, 0) report the group as alive.
                 try:
@@ -428,11 +496,12 @@ class LocalEnvironment(BaseEnvironment):
                     os.killpg(pgid, signal.SIGTERM)
                 except ProcessLookupError:
                     return
+                _signal_group_members(pgid, signal.SIGTERM)
 
                 # Wait on the process group, not just the shell wrapper. Under
                 # load the wrapper can exit before grandchildren do; returning
                 # at that point leaves orphaned process-group members behind.
-                if _wait_for_group_exit(pgid, 1.0):
+                if _wait_for_group_exit(pgid, 1.0, signal.SIGTERM):
                     return
 
                 try:
@@ -440,7 +509,8 @@ class LocalEnvironment(BaseEnvironment):
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     return
-                _wait_for_group_exit(pgid, 2.0)
+                _signal_group_members(pgid, signal.SIGKILL)
+                _wait_for_group_exit(pgid, 5.0, signal.SIGKILL)
                 try:
                     proc.wait(timeout=0.2)
                 except (subprocess.TimeoutExpired, OSError):

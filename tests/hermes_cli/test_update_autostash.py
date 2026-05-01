@@ -301,10 +301,10 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(hermes_main, "_stash_local_changes_if_needed", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_restore_stashed_changes", lambda *a, **kw: True)
-    monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: [])
-    monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: [])
-    monkeypatch.setattr(hermes_config, "check_config_version", lambda: (5, 5))
-    monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
+    monkeypatch.setattr("hermes_cli.config.get_missing_env_vars", lambda required_only=True: [])
+    monkeypatch.setattr("hermes_cli.config.get_missing_config_fields", lambda: [])
+    monkeypatch.setattr("hermes_cli.config.check_config_version", lambda: (5, 5))
+    monkeypatch.setattr("hermes_cli.config.migrate_config", lambda **kw: {"env_added": [], "config_added": []})
 
 
 def _install_fake_update_surface_modules(monkeypatch, calls):
@@ -596,9 +596,9 @@ def test_cmd_update_aborts_without_reset_when_ff_only_fails(monkeypatch, tmp_pat
     monkeypatch.setattr(hermes_main, "_update_node_dependencies", lambda: late_calls.append("node"))
     monkeypatch.setattr(hermes_main, "_build_web_ui", lambda *_: late_calls.append("build"))
     monkeypatch.setattr(hermes_main, "_run_raw_update_smoke_check", lambda: late_calls.append("smoke"))
-    monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: late_calls.append("config_env") or [])
-    monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: late_calls.append("config_fields") or [])
-    monkeypatch.setattr(hermes_config, "check_config_version", lambda: late_calls.append("config_version") or (5, 5))
+    monkeypatch.setattr("hermes_cli.config.get_missing_env_vars", lambda required_only=True: late_calls.append("config_env") or [])
+    monkeypatch.setattr("hermes_cli.config.get_missing_config_fields", lambda: late_calls.append("config_fields") or [])
+    monkeypatch.setattr("hermes_cli.config.check_config_version", lambda: late_calls.append("config_version") or (5, 5))
 
     side_effect, recorded = _make_update_side_effect(ff_only_fails=True)
     monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
@@ -812,9 +812,9 @@ def test_cmd_update_success_path_runs_smoke_before_profile_config_side_effects(m
     monkeypatch.setattr(hermes_main, "_update_node_dependencies", lambda: calls.append("node"))
     monkeypatch.setattr(hermes_main, "_build_web_ui", lambda *_: calls.append("build"))
     monkeypatch.setattr(hermes_main, "_run_raw_update_smoke_check", lambda: calls.append("smoke"))
-    monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: calls.append("config_env") or [])
-    monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: calls.append("config_fields") or [])
-    monkeypatch.setattr(hermes_config, "check_config_version", lambda: calls.append("config_version") or (5, 5))
+    monkeypatch.setattr("hermes_cli.config.get_missing_env_vars", lambda required_only=True: calls.append("config_env") or [])
+    monkeypatch.setattr("hermes_cli.config.get_missing_config_fields", lambda: calls.append("config_fields") or [])
+    monkeypatch.setattr("hermes_cli.config.check_config_version", lambda: calls.append("config_version") or (5, 5))
 
     side_effect, _ = _make_update_side_effect()
     monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
@@ -850,9 +850,9 @@ def test_cmd_update_smoke_failure_blocks_profile_config_and_gateway_side_effects
         raise SystemExit(1)
 
     monkeypatch.setattr(hermes_main, "_run_raw_update_smoke_check", fail_smoke)
-    monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: calls.append("config_env") or [])
-    monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: calls.append("config_fields") or [])
-    monkeypatch.setattr(hermes_config, "check_config_version", lambda: calls.append("config_version") or (5, 5))
+    monkeypatch.setattr("hermes_cli.config.get_missing_env_vars", lambda required_only=True: calls.append("config_env") or [])
+    monkeypatch.setattr("hermes_cli.config.get_missing_config_fields", lambda: calls.append("config_fields") or [])
+    monkeypatch.setattr("hermes_cli.config.check_config_version", lambda: calls.append("config_version") or (5, 5))
 
     side_effect, _ = _make_update_side_effect()
     monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
@@ -1013,7 +1013,7 @@ def test_cmd_update_skips_fork_sync_and_never_pushes(monkeypatch, tmp_path):
 
 
 def test_update_skills_sync_enabled_by_default(monkeypatch):
-    monkeypatch.setattr(hermes_config, "load_config", lambda: {})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
 
     assert hermes_main._should_sync_update_skills(SimpleNamespace()) is True
 
@@ -1042,7 +1042,7 @@ def test_cmd_update_config_false_skips_bundled_and_profile_skill_sync(monkeypatc
     _setup_update_mocks(monkeypatch, tmp_path)
     calls = []
     _install_fake_update_surface_modules(monkeypatch, calls)
-    monkeypatch.setattr(hermes_config, "load_config", lambda: {"updates": {"sync_skills": False}})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"updates": {"sync_skills": False}})
     monkeypatch.setattr(hermes_main, "_run_raw_update_smoke_check", lambda: calls.append("smoke"))
 
     side_effect, _ = _make_update_side_effect()
@@ -1060,7 +1060,7 @@ def test_cmd_update_no_skills_flag_skips_skill_sync_even_when_config_enabled(mon
     _setup_update_mocks(monkeypatch, tmp_path)
     calls = []
     _install_fake_update_surface_modules(monkeypatch, calls)
-    monkeypatch.setattr(hermes_config, "load_config", lambda: {"updates": {"sync_skills": True}})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"updates": {"sync_skills": True}})
     monkeypatch.setattr(hermes_main, "_run_raw_update_smoke_check", lambda: calls.append("smoke"))
 
     side_effect, _ = _make_update_side_effect()
@@ -1078,7 +1078,7 @@ def test_cmd_update_syncs_bundled_and_profile_skills_after_smoke_when_enabled(mo
     _setup_update_mocks(monkeypatch, tmp_path)
     calls = []
     _install_fake_update_surface_modules(monkeypatch, calls)
-    monkeypatch.setattr(hermes_config, "load_config", lambda: {"updates": {"sync_skills": True}})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"updates": {"sync_skills": True}})
     monkeypatch.setattr(hermes_main, "_run_raw_update_smoke_check", lambda: calls.append("smoke"))
 
     side_effect, _ = _make_update_side_effect()

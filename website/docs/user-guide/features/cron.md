@@ -246,11 +246,11 @@ By default, delivered cron output is wrapped with a header and footer so the rec
 
 ```text
 Cronjob Response: Morning feeds
-─────────────
 
 <agent output here>
 
-Note: The agent cannot see this message, and therefore cannot respond to it.
+Note: The agent cannot see this message,
+and therefore cannot respond to it.
 ```
 
 To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false`:

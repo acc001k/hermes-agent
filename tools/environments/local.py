@@ -451,7 +451,7 @@ class LocalEnvironment(BaseEnvironment):
         ) -> bool:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                if retry_signal is not None:
+                if retry_signal is not None and not _IS_WINDOWS:
                     # A child can appear/reparent inside the process group
                     # just after the initial group signal (bash may be in the
                     # middle of fork/exec when the interrupt lands). Keep

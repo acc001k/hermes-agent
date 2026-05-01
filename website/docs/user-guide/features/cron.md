@@ -242,16 +242,7 @@ The agent's final response is automatically delivered. You do not need to call `
 
 ### Response wrapping
 
-By default, delivered cron output is wrapped with a header and footer so the recipient knows it came from a scheduled task:
-
-```text
-Cronjob Response: Morning feeds
-
-<agent output here>
-
-Note: The agent cannot see this message,
-and therefore cannot respond to it.
-```
+By default, delivered cron output is wrapped with a header and footer so the recipient knows it came from a scheduled task. The delivered message includes the cron job name, the agent output, and a note that the scheduled agent cannot see or respond to the delivered notification.
 
 To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false`:
 

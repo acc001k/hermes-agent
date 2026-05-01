@@ -1,0 +1,195 @@
+name: Upstream Sync PR
+
+on:
+  schedule:
+    # Check official Nous upstream every 6 hours. This is notification/PR
+    # automation only; it never auto-merges into main.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync-pr
+  cancel-in-progress: true
+
+jobs:
+  upstream-sync-pr:
+    name: Create PR for official upstream updates
+    if: github.repository == 'acc001k/hermes-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout maintained fork
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare upstream comparison
+        id: compare
+        env:
+          UPSTREAM_URL: https://github.com/NousResearch/hermes-agent.git
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch origin main --prune
+          git fetch upstream main --prune
+
+          ORIGIN_SHA=$(git rev-parse origin/main)
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          COUNTS=$(git rev-list --left-right --count origin/main...upstream/main)
+          ORIGIN_ONLY=$(printf '%s' "$COUNTS" | awk '{print $1}')
+          UPSTREAM_ONLY=$(printf '%s' "$COUNTS" | awk '{print $2}')
+
+          echo "origin_sha=$ORIGIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "origin_only=$ORIGIN_ONLY" >> "$GITHUB_OUTPUT"
+          echo "upstream_only=$UPSTREAM_ONLY" >> "$GITHUB_OUTPUT"
+
+          echo "origin/main:   $ORIGIN_SHA"
+          echo "upstream/main: $UPSTREAM_SHA"
+          echo "origin-only commits:   $ORIGIN_ONLY"
+          echo "upstream-only commits: $UPSTREAM_ONLY"
+
+          if [ "$UPSTREAM_ONLY" = "0" ]; then
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream-only commits. Maintained fork is current enough."
+            exit 0
+          fi
+
+          echo "has_updates=true" >> "$GITHUB_OUTPUT"
+          git log --oneline --no-merges origin/main..upstream/main > /tmp/upstream-commits.txt
+
+      - name: Build sync branch
+        if: steps.compare.outputs.has_updates == 'true'
+        id: build
+        run: |
+          set -euo pipefail
+
+          BRANCH="upstream-sync/main"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          git checkout -B "$BRANCH" origin/main
+
+          if git merge --no-ff --no-edit upstream/main -m "chore: sync official upstream main"; then
+            echo "merge_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "merge_ok=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/upstream-conflicts.txt || true
+            git merge --abort || true
+            exit 0
+          fi
+
+          if git diff --quiet origin/main..HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open conflict issue
+        if: steps.compare.outputs.has_updates == 'true' && steps.build.outputs.merge_ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORIGIN_SHA: ${{ steps.compare.outputs.origin_sha }}
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+          UPSTREAM_ONLY: ${{ steps.compare.outputs.upstream_only }}
+        run: |
+          set -euo pipefail
+
+          TITLE="Upstream sync conflict: NousResearch/main -> maintained fork"
+          {
+            echo "## Upstream sync conflict"
+            echo
+            echo "Automated upstream sync found ${UPSTREAM_ONLY} upstream-only commit(s), but merge into the maintained fork conflicted."
+            echo
+            echo "- origin/main: \`${ORIGIN_SHA}\`"
+            echo "- upstream/main: \`${UPSTREAM_SHA}\`"
+            echo
+            echo "### Upstream commits"
+            echo '```'
+            cat /tmp/upstream-commits.txt
+            echo '```'
+            echo
+            echo "### Conflicted files"
+            echo '```'
+            cat /tmp/upstream-conflicts.txt || true
+            echo '```'
+            echo
+            echo "No automatic merge was performed. Review manually, run the normal test gate, then merge deliberately."
+          } > /tmp/upstream-conflict-issue.md
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // ""')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file /tmp/upstream-conflict-issue.md
+          else
+            gh issue create --title "$TITLE" --body-file /tmp/upstream-conflict-issue.md
+          fi
+
+          echo "::error::Upstream sync merge conflict. Issue created/updated."
+          exit 1
+
+      - name: Push sync branch
+        if: steps.compare.outputs.has_updates == 'true' && steps.build.outputs.merge_ok == 'true' && steps.build.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ steps.build.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "$BRANCH"
+
+      - name: Create or update upstream sync PR
+        if: steps.compare.outputs.has_updates == 'true' && steps.build.outputs.merge_ok == 'true' && steps.build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.build.outputs.branch }}
+          ORIGIN_SHA: ${{ steps.compare.outputs.origin_sha }}
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+          ORIGIN_ONLY: ${{ steps.compare.outputs.origin_only }}
+          UPSTREAM_ONLY: ${{ steps.compare.outputs.upstream_only }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Summary"
+            echo "- Creates a reviewable PR for official upstream changes from \`NousResearch/hermes-agent:main\`."
+            echo "- Does **not** auto-merge. Maintained-fork safety patches stay review-gated."
+            echo
+            echo "## Comparison"
+            echo "- origin/main: \`${ORIGIN_SHA}\`"
+            echo "- upstream/main: \`${UPSTREAM_SHA}\`"
+            echo "- origin-only commits: ${ORIGIN_ONLY}"
+            echo "- upstream-only commits: ${UPSTREAM_ONLY}"
+            echo
+            echo "## Upstream commits included"
+            echo '```'
+            cat /tmp/upstream-commits.txt
+            echo '```'
+            echo
+            echo "## Required review before merge"
+            echo "- [ ] Review upstream diff for update-path, provider, credential, tool, gateway, and runtime changes."
+            echo "- [ ] Confirm AK/Hermes maintained-fork commits are still preserved."
+            echo "- [ ] Wait for repository CI checks to pass."
+            echo "- [ ] Run local Hermes boot/update smoke after merge before declaring runtime current."
+          } > /tmp/upstream-sync-pr.md
+
+          TITLE="chore: sync official upstream Hermes main"
+          EXISTING=$(gh pr list --state open --head "$BRANCH" --base main --json number --jq '.[0].number // ""')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
+            echo "Updated existing PR #$EXISTING"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
+          fi
+
+      - name: No upstream PR needed
+        if: steps.compare.outputs.has_updates != 'true' || steps.build.outputs.changed == 'false'
+        run: |
+          echo "No upstream sync PR needed."

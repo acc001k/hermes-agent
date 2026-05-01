@@ -98,7 +98,7 @@ jobs:
       - name: Open conflict issue
         if: steps.compare.outputs.has_updates == 'true' && steps.build.outputs.merge_ok == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           ORIGIN_SHA: ${{ steps.compare.outputs.origin_sha }}
           UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
           UPSTREAM_ONLY: ${{ steps.compare.outputs.upstream_only }}
@@ -148,7 +148,7 @@ jobs:
       - name: Create or update upstream sync PR
         if: steps.compare.outputs.has_updates == 'true' && steps.build.outputs.merge_ok == 'true' && steps.build.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           BRANCH: ${{ steps.build.outputs.branch }}
           ORIGIN_SHA: ${{ steps.compare.outputs.origin_sha }}
           UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
@@ -182,11 +182,39 @@ jobs:
 
           TITLE="chore: sync official upstream Hermes main"
           EXISTING=$(gh pr list --state open --head "$BRANCH" --base main --json number --jq '.[0].number // ""')
+
+          set +e
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
-            echo "Updated existing PR #$EXISTING"
+            PR_RC=$?
+            [ "$PR_RC" -eq 0 ] && echo "Updated existing PR #$EXISTING"
           else
             gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
+            PR_RC=$?
+          fi
+          set -e
+
+          if [ "$PR_RC" -ne 0 ]; then
+            echo "::warning::Could not create/update PR with the available token; creating/updating an issue with the sync branch instead."
+            ISSUE_TITLE="Upstream sync ready: PR creation blocked for $BRANCH"
+            {
+              cat /tmp/upstream-sync-pr.md
+              echo
+              echo "## Manual PR fallback"
+              echo "The workflow pushed branch \`$BRANCH\`, but GitHub denied PR creation for the available token."
+              echo
+              echo "Open manually: https://github.com/acc001k/hermes-agent/compare/main...$BRANCH?expand=1"
+              echo
+              echo "To allow automated PR creation, add a repo secret named \`UPSTREAM_SYNC_TOKEN\` with pull-request creation rights."
+            } > /tmp/upstream-sync-issue.md
+
+            EXISTING_ISSUE=$(gh issue list --state open --search "$ISSUE_TITLE in:title" --json number --jq '.[0].number // ""')
+            if [ -n "$EXISTING_ISSUE" ]; then
+              gh issue comment "$EXISTING_ISSUE" --body-file /tmp/upstream-sync-issue.md
+              echo "Updated fallback issue #$EXISTING_ISSUE"
+            else
+              gh issue create --title "$ISSUE_TITLE" --body-file /tmp/upstream-sync-issue.md
+            fi
           fi
 
       - name: No upstream PR needed

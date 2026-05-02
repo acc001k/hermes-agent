@@ -95,6 +95,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("q",), args_hint="<prompt>"),
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
                args_hint="<prompt>"),
+    CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
+               args_hint="[text | pause | resume | clear | status]"),
     CommandDef("status", "Show session info", "Session"),
     CommandDef("profile", "Show active profile name and home directory", "Info"),
     CommandDef("sethome", "Set this chat as the home channel", "Session",
@@ -609,13 +611,26 @@ def _collect_gateway_skill_entries(
     try:
         from agent.skill_commands import get_skill_commands
         from tools.skills_tool import SKILLS_DIR
+        from agent.skill_utils import get_external_skills_dirs
         _skills_dir = str(SKILLS_DIR.resolve())
-        _hub_dir = str((SKILLS_DIR / ".hub").resolve())
+        _hub_dir = str((SKILLS_DIR / ".hub").resolve()).rstrip("/") + "/"
+        # Build set of allowed directory prefixes: local skills dir + any
+        # user-configured ``skills.external_dirs``. Ensure each prefix ends
+        # with ``/`` so ``/my-skills`` does not also match ``/my-skills-extra``.
+        # Without this widening, external skills are visible in
+        # ``hermes skills list`` and the agent's ``/skill-name`` dispatch but
+        # silently excluded from gateway slash menus (#8110).
+        _allowed_prefixes = [_skills_dir.rstrip("/") + "/"]
+        _allowed_prefixes.extend(
+            str(d).rstrip("/") + "/" for d in get_external_skills_dirs()
+        )
         skill_cmds = get_skill_commands()
         for cmd_key in sorted(skill_cmds):
             info = skill_cmds[cmd_key]
             skill_path = info.get("skill_md_path", "")
-            if not skill_path.startswith(_skills_dir):
+            if not skill_path:
+                continue
+            if not any(skill_path.startswith(prefix) for prefix in _allowed_prefixes):
                 continue
             if skill_path.startswith(_hub_dir):
                 continue
@@ -836,6 +851,13 @@ def discord_skill_commands_by_category(
 _SLACK_MAX_SLASH_COMMANDS = 50
 _SLACK_NAME_LIMIT = 32
 _SLACK_INVALID_CHARS = re.compile(r"[^a-z0-9_\-]")
+_SLACK_RESERVED_COMMANDS = frozenset({
+    # Built-in Slack slash commands that cannot be registered by apps.
+    # https://slack.com/help/articles/201259356-Use-built-in-slash-commands
+    "me", "status", "away", "dnd", "shrug", "remind", "msg", "feed",
+    "who", "collapse", "expand", "leave", "join", "open", "search",
+    "topic", "mute", "pro", "shortcuts",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -862,6 +884,10 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     documented form (e.g. ``/background``, ``/bg``, and ``/btw`` all work).
     Plugin-registered slash commands are included too.
 
+    Commands whose sanitized name collides with a Slack built-in
+    (e.g. ``/status``, ``/me``, ``/join``) are silently skipped.  Users
+    can still reach them via ``/hermes <command>``.
+
     Results are clamped to Slack's 50-command limit with duplicate-name
     avoidance. ``/hermes`` is always reserved as the first entry so the
     legacy ``/hermes <subcommand>`` form keeps working for anything that
@@ -878,6 +904,8 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     def _add(name: str, desc: str, hint: str) -> None:
         slack_name = _sanitize_slack_name(name)
         if not slack_name or slack_name in seen:
+            return
+        if slack_name in _SLACK_RESERVED_COMMANDS:
             return
         if len(entries) >= _SLACK_MAX_SLASH_COMMANDS:
             return

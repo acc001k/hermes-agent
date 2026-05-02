@@ -430,7 +430,11 @@ class TestCmdUpdateLaunchdRestart:
         restart.assert_called_once_with("coder", 12345)
         graceful.assert_called_once()
         # Graceful drain succeeded — no SIGTERM fallback needed.
-        kill.assert_not_called()
+        term_calls = [
+            c for c in kill.call_args_list
+            if c.args[1] == __import__("signal").SIGTERM
+        ]
+        assert term_calls == []
         assert "Restarting manual gateway profile(s): coder" in captured
         assert "Restart manually: hermes gateway run" not in captured
 
@@ -468,7 +472,11 @@ class TestCmdUpdateLaunchdRestart:
         restart.assert_called_once_with("coder", 12345)
         graceful.assert_called_once()
         # Graceful drain returned False → SIGTERM fallback.
-        kill.assert_called_once()
+        term_calls = [
+            c for c in kill.call_args_list
+            if c.args[1] == __import__("signal").SIGTERM
+        ]
+        assert len(term_calls) == 1
         assert "Restarting manual gateway profile(s): coder" in captured
 
     @patch("shutil.which", return_value=None)
@@ -891,9 +899,13 @@ class TestServicePidExclusion:
 
         captured = capsys.readouterr().out
         assert "Restarted" in captured
-        # Manual PID should be killed
-        manual_kills = [c for c in mock_kill.call_args_list if c.args[0] == MANUAL_PID]
-        assert len(manual_kills) == 1
+        # Manual PID should receive SIGTERM. If the test double keeps reporting
+        # it as alive, the stale-process survivor sweep may also SIGKILL it.
+        manual_terms = [
+            c for c in mock_kill.call_args_list
+            if c.args[0] == MANUAL_PID and c.args[1] == __import__("signal").SIGTERM
+        ]
+        assert len(manual_terms) == 1
         # Service PID should NOT be killed
         service_kills = [c for c in mock_kill.call_args_list if c.args[0] == SERVICE_PID]
         assert len(service_kills) == 0

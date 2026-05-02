@@ -152,8 +152,8 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          echo "::error::Upstream sync merge conflict. No automatic merge was performed."
-          exit 1
+          echo "::warning::Upstream sync merge conflict. No automatic merge was performed; report was written to issue or job summary."
+          exit 0
 
       - name: Push sync branch
         if: steps.compare.outputs.has_updates == 'true' && steps.build.outputs.merge_ok == 'true' && steps.build.outputs.changed == 'true'
@@ -205,9 +205,12 @@ jobs:
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
             PR_RC=$?
-            [ "$PR_RC" -eq 0 ] && echo "Updated existing PR #$EXISTING"
+            if [ "$PR_RC" -eq 0 ]; then
+              gh pr ready "$EXISTING" --undo || echo "::warning::Could not convert existing upstream sync PR #$EXISTING back to draft"
+              echo "Updated existing draft PR #$EXISTING"
+            fi
           else
-            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
+            gh pr create --draft --base main --head "$BRANCH" --title "$TITLE" --body-file /tmp/upstream-sync-pr.md
             PR_RC=$?
           fi
           set -e

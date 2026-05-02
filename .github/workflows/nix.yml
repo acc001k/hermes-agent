@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -15,6 +16,7 @@ concurrency:
 
 jobs:
   nix:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]

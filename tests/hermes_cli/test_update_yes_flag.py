@@ -118,10 +118,8 @@ class TestUpdateYesConfigMigration:
         args = SimpleNamespace(yes=False)
 
         with patch("builtins.input", return_value="n") as mock_input, patch(
-            "hermes_cli.main.sys"
-        ) as mock_sys:
-            mock_sys.stdin.isatty.return_value = True
-            mock_sys.stdout.isatty.return_value = True
+            "hermes_cli.main.sys.stdin.isatty", return_value=True
+        ), patch("hermes_cli.main.sys.stdout.isatty", return_value=True):
             cmd_update(args)
             # The user was actually prompted.
             assert mock_input.called

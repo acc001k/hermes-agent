@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.main import cmd_update, PROJECT_ROOT
+from hermes_cli.main import cmd_update, PROJECT_ROOT, _run_npm_install_deterministic
 
 
 def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
@@ -163,3 +163,38 @@ class TestCmdUpdateBranchFallback:
             mock_input.assert_not_called()
             captured = capsys.readouterr()
             assert "Non-interactive session" in captured.out
+
+
+def test_deterministic_npm_install_can_refuse_install_fallback(tmp_path):
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="ci failed")
+
+    with patch("subprocess.run", side_effect=fake_run) as mock_run:
+        result = _run_npm_install_deterministic(
+            "/usr/bin/npm",
+            tmp_path,
+            extra_args=("--silent",),
+            allow_install_fallback=False,
+        )
+
+    assert result.returncode == 1
+    assert [call.args[0][1] for call in mock_run.call_args_list] == ["ci"]
+
+
+def test_deterministic_npm_install_fallback_remains_opt_in(tmp_path):
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="failed")
+
+    with patch("subprocess.run", side_effect=fake_run) as mock_run:
+        _run_npm_install_deterministic(
+            "/usr/bin/npm",
+            tmp_path,
+            extra_args=("--silent",),
+            allow_install_fallback=True,
+        )
+
+    assert [call.args[0][1] for call in mock_run.call_args_list] == ["ci", "install"]

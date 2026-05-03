@@ -1042,18 +1042,17 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     if _tui_need_npm_install(tui_dir):
         if not os.environ.get("HERMES_QUIET"):
             print("Installing TUI dependencies…")
-        result = subprocess.run(
-            [npm, "install", "--silent", "--no-fund", "--no-audit", "--progress=false"],
-            cwd=str(tui_dir),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+        result = _run_npm_install_deterministic(
+            npm,
+            tui_dir,
+            extra_args=("--silent", "--no-fund", "--no-audit", "--progress=false"),
+            allow_install_fallback=False,
             env={**os.environ, "CI": "1"},
         )
         if result.returncode != 0:
             err = (result.stderr or "").strip()
             preview = "\n".join(err.splitlines()[-30:])
-            print("npm install failed.")
+            print("npm ci failed.")
             if preview:
                 print(preview)
             sys.exit(1)
@@ -5266,15 +5265,19 @@ def _run_npm_install_deterministic(
     *,
     extra_args: tuple[str, ...] = (),
     capture_output: bool = True,
+    allow_install_fallback: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a deterministic npm install that does not mutate ``package-lock.json``.
 
-    Prefers ``npm ci`` (strict, lockfile-preserving) when a lockfile is present;
-    falls back to ``npm install`` only if ``npm ci`` fails (e.g. lockfile out of
-    sync on a WIP checkout).  Without this, ``npm install`` on npm ≥ 10 silently
-    rewrites committed lockfiles (stripping ``"peer": true`` etc.), which leaves
-    the working tree dirty and causes the next ``hermes update`` to stash the
-    lockfile — repeatedly.
+    Prefers ``npm ci`` (strict, lockfile-preserving) when a lockfile is present.
+    Callers running in update/deployment contexts should set
+    ``allow_install_fallback=False`` so a failed ``npm ci`` leaves the checkout
+    clean instead of falling back to ``npm install``.  The fallback remains
+    available for WIP checkouts where updating the lockfile is acceptable.
+    Without this, ``npm install`` on npm >= 10 silently rewrites committed
+    lockfiles (stripping ``"peer": true`` etc.), leaving the working tree dirty
+    and causing the next ``hermes update`` to stash the lockfile repeatedly.
     """
     lockfile = cwd / "package-lock.json"
     if lockfile.exists():
@@ -5285,11 +5288,12 @@ def _run_npm_install_deterministic(
             capture_output=capture_output,
             text=True,
             check=False,
+            env=env,
         )
-        if ci_result.returncode == 0:
+        if ci_result.returncode == 0 or not allow_install_fallback:
             return ci_result
-        # Fall through to `npm install` — lockfile may be out of sync on a
-        # WIP fork/branch, or `npm ci` may not be available on very old npm.
+        # Fall through to `npm install` only for callers that explicitly allow
+        # mutating a WIP checkout to repair an out-of-sync lockfile.
     install_cmd = [npm, "install", *extra_args]
     return subprocess.run(
         install_cmd,
@@ -5297,6 +5301,7 @@ def _run_npm_install_deterministic(
         capture_output=capture_output,
         text=True,
         check=False,
+        env=env,
     )
 
 
@@ -6273,6 +6278,7 @@ def _update_node_dependencies() -> None:
             npm,
             path,
             extra_args=("--silent", "--no-fund", "--no-audit", "--progress=false"),
+            allow_install_fallback=False,
         )
         if result.returncode == 0:
             print(f"  ✓ {label}")

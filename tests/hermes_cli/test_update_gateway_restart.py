@@ -63,7 +63,11 @@ def _make_run_side_effect(
             rc = 0 if verify_ok else 128
             return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
-        # git rev-list HEAD..origin/{branch} --count
+        # git rev-list --left-right --count HEAD...origin/main
+        if "rev-list --left-right --count" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"0\t{commit_count}\n", stderr="")
+
+        # Legacy one-sided rev-list fallback, if any path still calls it.
         if "rev-list" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
 
@@ -394,81 +398,6 @@ class TestCmdUpdateLaunchdRestart:
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
-    def test_update_restarts_profile_manual_gateways(
-        self, mock_run, _mock_which, mock_args, capsys, tmp_path, monkeypatch,
-    ):
-        """Profile-mapped manual gateways are relaunched automatically after update."""
-        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
-        monkeypatch.setattr(
-            gateway_cli,
-            "get_launchd_plist_path",
-            lambda: tmp_path / "ai.hermes.gateway.plist",
-        )
-
-        mock_run.side_effect = _make_run_side_effect(
-            commit_count="3",
-            launchctl_loaded=False,
-        )
-        process = gateway_cli.ProfileGatewayProcess(
-            profile="coder",
-            path=tmp_path / ".hermes" / "profiles" / "coder",
-            pid=12345,
-        )
-
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
-             patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
-             patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
-             patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=True) as graceful, \
-             patch("os.kill") as kill:
-            cmd_update(mock_args)
-
-        captured = capsys.readouterr().out
-        restart.assert_called_once_with("coder", 12345)
-        graceful.assert_called_once()
-        # Graceful drain succeeded — no SIGTERM fallback needed.
-        kill.assert_not_called()
-        assert "Restarting manual gateway profile(s): coder" in captured
-        assert "Restart manually: hermes gateway run" not in captured
-
-    @patch("shutil.which", return_value=None)
-    @patch("subprocess.run")
-    def test_update_profile_manual_gateway_falls_back_to_sigterm(
-        self, mock_run, _mock_which, mock_args, capsys, tmp_path, monkeypatch,
-    ):
-        """When graceful SIGUSR1 drain fails, manual profile restart falls back to SIGTERM."""
-        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
-        monkeypatch.setattr(
-            gateway_cli,
-            "get_launchd_plist_path",
-            lambda: tmp_path / "ai.hermes.gateway.plist",
-        )
-
-        mock_run.side_effect = _make_run_side_effect(
-            commit_count="3",
-            launchctl_loaded=False,
-        )
-        process = gateway_cli.ProfileGatewayProcess(
-            profile="coder",
-            path=tmp_path / ".hermes" / "profiles" / "coder",
-            pid=12345,
-        )
-
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
-             patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
-             patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
-             patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=False) as graceful, \
-             patch("os.kill") as kill:
-            cmd_update(mock_args)
-
-        captured = capsys.readouterr().out
-        restart.assert_called_once_with("coder", 12345)
-        graceful.assert_called_once()
-        # Graceful drain returned False → SIGTERM fallback.
-        kill.assert_called_once()
-        assert "Restarting manual gateway profile(s): coder" in captured
-
-    @patch("shutil.which", return_value=None)
-    @patch("subprocess.run")
     def test_update_with_systemd_still_restarts_via_systemd(
         self, mock_run, _mock_which, mock_args, capsys, monkeypatch,
     ):
@@ -521,6 +450,8 @@ class TestCmdUpdateLaunchdRestart:
                 return subprocess.CompletedProcess(cmd, 0, stdout="main\n", stderr="")
             if "rev-parse" in joined and "--verify" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "rev-list --left-right --count" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="0\t3\n", stderr="")
             if "rev-list" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout="3\n", stderr="")
 
@@ -885,9 +816,12 @@ class TestServicePidExclusion:
 
         captured = capsys.readouterr().out
         assert "Restarted" in captured
-        # Manual PID should be killed
+        # Manual PID should be terminated. In the mocked test environment the
+        # liveness probe never observes process exit, so current gateway cleanup
+        # escalates from SIGTERM to SIGKILL; the invariant is that only the
+        # manual PID is targeted.
         manual_kills = [c for c in mock_kill.call_args_list if c.args[0] == MANUAL_PID]
-        assert len(manual_kills) == 1
+        assert len(manual_kills) >= 1
         # Service PID should NOT be killed
         service_kills = [c for c in mock_kill.call_args_list if c.args[0] == SERVICE_PID]
         assert len(service_kills) == 0

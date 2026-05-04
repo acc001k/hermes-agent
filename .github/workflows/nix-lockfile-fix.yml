@@ -49,7 +49,27 @@ jobs:
       group: auto-fix-main
       cancel-in-progress: true
     steps:
+      - name: Check GitHub App secrets
+        id: app-secrets
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping main-branch Nix auto-fix because APP_ID/APP_PRIVATE_KEY repo secrets are not configured."
+            {
+              echo "### Nix Lockfile Fix skipped"
+              echo ""
+              echo "APP_ID and APP_PRIVATE_KEY repo secrets are required for main-branch auto-fix commits."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Generate GitHub App token
+        if: steps.app-secrets.outputs.available == 'true'
         id: app-token
         uses: actions/create-github-app-token@7bfa3a4717ef143a604ee0a99d859b8886a96d00  # v1.9.3
         with:
@@ -57,20 +77,23 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        if: steps.app-secrets.outputs.available == 'true'
         with:
           ref: main
           token: ${{ steps.app-token.outputs.token }}
 
       - uses: ./.github/actions/nix-setup
+        if: steps.app-secrets.outputs.available == 'true'
         with:
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Apply lockfile hashes
+        if: steps.app-secrets.outputs.available == 'true'
         id: apply
         run: nix run .#fix-lockfiles -- --apply
 
       - name: Commit & push
-        if: steps.apply.outputs.changed == 'true'
+        if: steps.app-secrets.outputs.available == 'true' && steps.apply.outputs.changed == 'true'
         shell: bash
         run: |
           set -euo pipefail

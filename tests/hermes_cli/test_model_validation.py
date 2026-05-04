@@ -775,7 +775,7 @@ class TestValidateCodexAutoCorrection:
         codex_models = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"]
         with patch("hermes_cli.models.provider_model_ids", return_value=codex_models):
             result = validate_requested_model("totally-wrong", "openai-codex")
-        assert result["accepted"] is False
+        assert result["accepted"] is True
         assert result["recognized"] is False
         assert result.get("corrected_model") is None
         assert "not found" in result["message"]

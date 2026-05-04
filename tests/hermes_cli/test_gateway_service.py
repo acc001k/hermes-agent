@@ -41,6 +41,7 @@ class TestSystemdServiceRefresh:
 
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda system=False, run_as_user=None: "new unit\n")
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *a, **kw: None)
 
         calls = []
 
@@ -64,6 +65,7 @@ class TestSystemdServiceRefresh:
 
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda system=False, run_as_user=None: "new unit\n")
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *a, **kw: None)
 
         calls = []
 
@@ -87,6 +89,7 @@ class TestSystemdServiceRefresh:
 
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda system=False, run_as_user=None: "new unit\n")
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *a, **kw: None)
 
         calls = []
 
@@ -127,11 +130,8 @@ class TestSystemdServiceRefresh:
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
 
         # Prevent run_gateway from actually starting the gateway
-        def fake_start_gateway(**kwargs):
-            import asyncio
-            f = asyncio.Future()
-            f.set_result(True)
-            return f
+        async def fake_start_gateway(**kwargs):
+            return True
 
         monkeypatch.setattr("gateway.run.start_gateway", fake_start_gateway)
 
@@ -164,16 +164,25 @@ class TestRequireServiceInstalled:
 
 class TestGeneratedSystemdUnits:
     def test_user_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self):
-        unit = gateway_cli.generate_systemd_unit(system=False)
+        original_timeout = os.environ.pop("HERMES_RESTART_DRAIN_TIMEOUT", None)
+        original_read_raw_config = gateway_cli.read_raw_config
+        gateway_cli.read_raw_config = lambda: {}
+        try:
+            unit = gateway_cli.generate_systemd_unit(system=False)
+        finally:
+            gateway_cli.read_raw_config = original_read_raw_config
+            if original_timeout is not None:
+                os.environ["HERMES_RESTART_DRAIN_TIMEOUT"] = original_timeout
+
 
         assert "ExecStart=" in unit
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        # TimeoutStopSec must exceed the default drain_timeout (60s) so
-        # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
-        # (tool subprocess kill, adapter disconnect) runs — issue #8202.
-        assert "TimeoutStopSec=90" in unit
+        # TimeoutStopSec must exceed the default drain_timeout so systemd
+        # doesn't SIGKILL the cgroup before post-interrupt cleanup runs.
+        expected_timeout = int(DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT) + 30
+        assert f"TimeoutStopSec={expected_timeout}" in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
@@ -220,16 +229,25 @@ class TestGeneratedSystemdUnits:
         assert "/mnt/c/WINDOWS/system32" in unit
 
     def test_system_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self):
-        unit = gateway_cli.generate_systemd_unit(system=True)
+        original_timeout = os.environ.pop("HERMES_RESTART_DRAIN_TIMEOUT", None)
+        original_read_raw_config = gateway_cli.read_raw_config
+        gateway_cli.read_raw_config = lambda: {}
+        try:
+            unit = gateway_cli.generate_systemd_unit(system=True)
+        finally:
+            gateway_cli.read_raw_config = original_read_raw_config
+            if original_timeout is not None:
+                os.environ["HERMES_RESTART_DRAIN_TIMEOUT"] = original_timeout
+
 
         assert "ExecStart=" in unit
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        # TimeoutStopSec must exceed the default drain_timeout (60s) so
-        # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
-        # (tool subprocess kill, adapter disconnect) runs — issue #8202.
-        assert "TimeoutStopSec=90" in unit
+        # TimeoutStopSec must exceed the default drain_timeout so systemd
+        # doesn't SIGKILL the cgroup before post-interrupt cleanup runs.
+        expected_timeout = int(DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT) + 30
+        assert f"TimeoutStopSec={expected_timeout}" in unit
         assert "WantedBy=multi-user.target" in unit
 
 
@@ -581,6 +599,7 @@ class TestGatewaySystemServiceRouting:
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: calls.append(("refresh", system)))
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *a, **kw: None)
         monkeypatch.setattr(
             "gateway.status.get_running_pid",
             lambda: 654,
@@ -636,6 +655,7 @@ class TestGatewaySystemServiceRouting:
         monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
         monkeypatch.setattr(gateway_cli, "_require_service_installed", lambda action, system=False: None)
         monkeypatch.setattr(gateway_cli, "refresh_systemd_unit_if_needed", lambda system=False: None)
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *a, **kw: None)
         monkeypatch.setattr(
             "gateway.status.read_runtime_status",
             lambda: {"restart_requested": True, "gateway_state": "stopped"},

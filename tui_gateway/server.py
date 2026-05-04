@@ -551,8 +551,20 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 _clear_session_context(tokens)
 
             # Session DB row deferred to first run_conversation() call.
-            # pending_title applied post-first-message (see cli.exec handler).
+            # pending_title is applied best-effort here if a row already exists,
+            # and retried post-first-message by the cli.exec handler otherwise.
             current["agent"] = agent
+            _pending = current.get("pending_title")
+            if _pending:
+                _pdb = _get_db()
+                if _pdb:
+                    try:
+                        if _pdb.set_session_title(key, _pending):
+                            current["pending_title"] = None
+                    except ValueError:
+                        current["pending_title"] = None
+                    except Exception:
+                        pass
 
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
@@ -3045,6 +3057,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     try:
                         if _pdb.set_session_title(session.get("session_key") or sid, _pending):
                             session["pending_title"] = None
+                    except ValueError:
+                        session["pending_title"] = None
                     except Exception:
                         pass  # Best effort — auto-title will handle it below
 

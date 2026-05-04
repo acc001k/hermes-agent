@@ -44,9 +44,7 @@ jobs:
           uv pip install -e ".[all,dev]"
 
       - name: Run tests
-        run: |
-          source .venv/bin/activate
-          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
+        run: scripts/run_tests.sh -q --tb=short
         env:
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""

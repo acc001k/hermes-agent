@@ -41,10 +41,12 @@ fi
 
 PYTHON="$VENV/bin/python"
 
-# ── Ensure pytest-split is installed (required for shard-equivalent runs) ──
+# ── Optional pytest-split availability ─────────────────────────────────────
+# pytest-split is only needed for split/shard-equivalent runs. Do not make the
+# normal test wrapper depend on runtime pip availability: Nix and some shared
+# fallback venvs deliberately omit pip.
 if ! "$PYTHON" -c "import pytest_split" 2>/dev/null; then
-  echo "→ installing pytest-split into $VENV"
-  "$PYTHON" -m pip install --quiet "pytest-split>=0.9,<1"
+  echo "→ pytest-split not installed in $VENV; continuing (not needed for this run)"
 fi
 
 # ── Hermetic environment ────────────────────────────────────────────────────

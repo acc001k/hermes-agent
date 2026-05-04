@@ -37,6 +37,7 @@ def _make_agent(monkeypatch):
         tool_start_callback = None
         tool_complete_callback = None
         _todo_store = MagicMock()
+        _tool_guardrails = MagicMock()
         _session_db = None
         valid_tool_names = set()
         _turns_since_memory = 0
@@ -72,6 +73,9 @@ def _make_agent(monkeypatch):
         def _has_stream_consumers(self):
             return False
 
+        def _append_guardrail_observation(self, function_name, function_args, function_result, guardrail_decision=None, **kwargs):
+            return function_result
+
     stub = _Stub()
     # Bind the real methods under test
     stub._execute_tool_calls_concurrent = _ra.AIAgent._execute_tool_calls_concurrent.__get__(stub)
@@ -81,6 +85,7 @@ def _make_agent(monkeypatch):
     # tool batch. Stub it as a no-op — this test exercises interrupt
     # fanout, not steer injection.
     stub._apply_pending_steer_to_tool_results = lambda *a, **kw: None
+    stub._tool_guardrails.before_call.return_value = MagicMock(allows_execution=True)
     stub._invoke_tool = MagicMock(side_effect=lambda *a, **kw: '{"ok": true}')
     return stub
 
@@ -107,7 +112,7 @@ def test_concurrent_interrupt_cancels_pending(monkeypatch):
 
     original_invoke = agent._invoke_tool
 
-    def slow_tool(name, args, task_id, call_id=None):
+    def slow_tool(name, args, task_id, call_id=None, **kwargs):
         if name == "slow_one":
             # Block until the test sets the interrupt
             barrier.wait(timeout=10)
@@ -184,7 +189,7 @@ def test_running_concurrent_worker_sees_is_interrupted(monkeypatch):
     observed = {"saw_true": False, "poll_count": 0, "worker_tid": None}
     worker_started = threading.Event()
 
-    def polling_tool(name, args, task_id, call_id=None, messages=None):
+    def polling_tool(name, args, task_id, call_id=None, messages=None, **kwargs):
         observed["worker_tid"] = threading.current_thread().ident
         worker_started.set()
         deadline = time.monotonic() + 5.0

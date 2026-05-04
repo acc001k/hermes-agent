@@ -425,8 +425,10 @@ class TestCmdUpdateLaunchdRestart:
         captured = capsys.readouterr().out
         restart.assert_called_once_with("coder", 12345)
         graceful.assert_called_once()
-        # Graceful drain succeeded — no SIGTERM fallback needed.
-        kill.assert_not_called()
+        # Graceful drain succeeded — no SIGTERM fallback needed. A later stale
+        # process sweep may still SIGKILL a PID that the test keeps reporting
+        # as alive.
+        assert all(c.args[1] != gateway_cli.signal.SIGTERM for c in kill.call_args_list)
         assert "Restarting manual gateway profile(s): coder" in captured
         assert "Restart manually: hermes gateway run" not in captured
 
@@ -463,8 +465,9 @@ class TestCmdUpdateLaunchdRestart:
         captured = capsys.readouterr().out
         restart.assert_called_once_with("coder", 12345)
         graceful.assert_called_once()
-        # Graceful drain returned False → SIGTERM fallback.
-        kill.assert_called_once()
+        # Graceful drain returned False → SIGTERM fallback. Termination may
+        # subsequently escalate to SIGKILL if the mocked PID remains alive.
+        assert kill.call_args_list[0].args[1] == gateway_cli.signal.SIGTERM
         assert "Restarting manual gateway profile(s): coder" in captured
 
     @patch("shutil.which", return_value=None)
@@ -885,9 +888,10 @@ class TestServicePidExclusion:
 
         captured = capsys.readouterr().out
         assert "Restarted" in captured
-        # Manual PID should be killed
+        # Manual PID should be terminated; the mocked process may receive both
+        # SIGTERM and SIGKILL because it never disappears from the fake scan.
         manual_kills = [c for c in mock_kill.call_args_list if c.args[0] == MANUAL_PID]
-        assert len(manual_kills) == 1
+        assert any(c.args[1] == gateway_cli.signal.SIGTERM for c in manual_kills)
         # Service PID should NOT be killed
         service_kills = [c for c in mock_kill.call_args_list if c.args[0] == SERVICE_PID]
         assert len(service_kills) == 0
